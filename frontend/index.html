@@ -122,14 +122,6 @@
                     <span id="stat-pos">X:0 Y:0</span> •
                     <span id="stat-mode">Select</span>
                 </div>
-                <!-- AI CHAT INPUT BAR -->
-                <div class="chat-bar">
-                    <div class="chat-bar-label">💬 AI</div>
-                    <input type="text" id="chat-input" class="chat-input"
-                        placeholder="Describe your problem… e.g. &quot;Portal frame 12m wide 4m tall, 2 ton/m UDL on beam, fixed at A pin at B&quot;"
-                        autocomplete="off">
-                    <button id="chat-send-btn" class="btn btn-primary chat-send">Solve ▶</button>
-                </div>
             </div>
 
             <!-- RIGHT PANEL -->
@@ -230,6 +222,15 @@
                 <span id="status-model">Nodes: 0 | Elements: 0 | Supports: 0 | Loads: 0</span>
             </div>
         </div>
+    </div>
+
+    <!-- AI CHAT BAR (full-width, outside main-layout so it's never clipped) -->
+    <div class="chat-bar">
+        <div class="chat-bar-label">💬 AI Solver</div>
+        <input type="text" id="chat-input" class="chat-input"
+            placeholder="Type your problem… e.g. &quot;Portal frame 12m wide 4m tall, 2 ton/m on beam, fixed at A, pin at B&quot;  — press Enter to solve"
+            autocomplete="off">
+        <button id="chat-send-btn" class="btn btn-primary chat-send">Solve ▶</button>
     </div>
 
     <!-- MODALS -->

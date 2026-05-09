@@ -80,6 +80,7 @@ body {
     display: flex;
     flex: 1;
     overflow: hidden;
+    min-height: 0;   /* allow shrinking so chat bar is visible */
 }
 
 .left-toolbar {
@@ -135,24 +136,27 @@ body {
     gap: 12px;
 }
 
-/* ── AI Chat Bar ── */
+/* ── AI Chat Bar (fixed bottom strip, always visible) ── */
 .chat-bar {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 12px;
+    padding: 8px 14px;
     background: #1e2a3a;
     border-top: 2px solid var(--accent-primary);
+    flex-shrink: 0;
+    height: 52px;
+    z-index: 50;
 }
 .chat-bar-label {
     font-size: 13px;
-    font-weight: 600;
+    font-weight: 700;
     color: var(--accent-primary);
     white-space: nowrap;
 }
 .chat-input {
     flex: 1;
-    padding: 8px 12px;
+    padding: 8px 14px;
     background: #2a3a4a;
     border: 1px solid var(--accent-primary);
     border-radius: 20px;
@@ -167,8 +171,9 @@ body {
 .chat-input::placeholder { color: #6a8aaa; }
 .chat-send {
     border-radius: 20px;
-    padding: 7px 18px;
+    padding: 7px 20px;
     font-size: 13px;
+    font-weight: 600;
     white-space: nowrap;
 }
 
