@@ -298,6 +298,30 @@ class LemonFoxClient:
                 f"Response (first 400): {raw[:400]}"
             )
 
+        # If LLM returned empty nodes — retry with an even more explicit prompt
+        if not result.get('nodes'):
+            retry_prompt = (
+                f"The following OCR text was extracted from a structural engineering image.\n"
+                f"Build a complete FEM beam model from it. "
+                f"If you see span lengths, supports labels (A,B,C), and loads — use them.\n"
+                f"If the text is unclear, create a default simply-supported beam 6m long "
+                f"with a 50 kN central point load.\n\n"
+                f"OCR text:\n{_ocr_image(image_path)}\n\n"
+                f"{EXTRACTION_PROMPT}"
+            )
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system",
+                         "content": "You are a structural engineering assistant. Return only valid JSON."},
+                        {"role": "user", "content": retry_prompt}
+                    ]
+                )
+                result = self._parse_json(response.choices[0].message.content)
+            except Exception:
+                pass  # Fall through — frontend will show helpful error
+
         # Override node coordinates with OCR-computed geometry (more reliable)
         x_coords, n_ocr = self._extract_geometry_from_ocr(image_path)
         nodes = result.get('nodes', [])

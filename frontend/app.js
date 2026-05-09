@@ -484,13 +484,25 @@ class BeamSolverApp {
             const cm = data.extraction?.canvas_model;
             if (!cm) { status.textContent = 'No structure data returned'; return; }
 
+            // Guard: nothing extracted — show helpful message, don't solve
+            if (!cm.nodes || cm.nodes.length === 0) {
+                status.textContent = '';
+                this.logError(
+                    'AI could not read the structure from this image. ' +
+                    'Make sure the image shows a clear beam diagram with visible ' +
+                    'supports, spans/dimensions, and loads. ' +
+                    'Text-only pages (instructions, notes) cannot be extracted.'
+                );
+                return;
+            }
+
             // Load model onto canvas
             this._loadCanvasModel(cm);
             document.getElementById('modal-ai-extract').classList.add('hidden');
 
             const v = data.extraction?.validation;
-            if (v?.issues?.length)   this.logError('AI extract warnings: ' + v.issues.join('; '));
-            if (v?.warnings?.length) this.log('Warnings: ' + v.warnings.join('; '));
+            if (v?.issues?.length)   this.logError('AI warnings: ' + v.issues.join('; '));
+            if (v?.warnings?.length) this.log('Note: ' + v.warnings.join('; '));
 
             this.log(`AI extracted: ${cm.nodes.length} nodes, `
                    + `${cm.elements.length} elements, `
