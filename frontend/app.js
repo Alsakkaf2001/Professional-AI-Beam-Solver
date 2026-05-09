@@ -63,6 +63,13 @@ class BeamSolverApp {
         document.getElementById('btn-export-pdf').addEventListener('click',() => this.exportPDF());
         document.getElementById('btn-export-dxf').addEventListener('click',() => this.exportDXF());
         document.getElementById('btn-extract-image').addEventListener('click', () => this.openAIExtract());
+        document.getElementById('btn-frame-builder').addEventListener('click', () => this.openFrameBuilder());
+
+        // Frame builder modal
+        document.getElementById('fb-cancel-btn').addEventListener('click', () => {
+            document.getElementById('modal-frame-builder').classList.add('hidden');
+        });
+        document.getElementById('fb-build-btn').addEventListener('click', () => this.buildFrame());
 
         // Property panel changes
         document.getElementById('material-select').addEventListener('change', e => {
@@ -461,6 +468,45 @@ class BeamSolverApp {
         document.getElementById('modal-ai-extract').classList.remove('hidden');
     }
 
+    openFrameBuilder() {
+        document.getElementById('modal-frame-builder').classList.remove('hidden');
+    }
+
+    async buildFrame() {
+        const span     = parseFloat(document.getElementById('fb-span').value)   || 12;
+        const height   = parseFloat(document.getElementById('fb-height').value) || 4;
+        const loadVal  = parseFloat(document.getElementById('fb-load').value)   || 0;
+        const loadUnit = document.getElementById('fb-load-unit').value;
+        const leftSup  = document.getElementById('fb-left-sup').value;
+        const rightSup = document.getElementById('fb-right-sup').value;
+        const secCol   = document.getElementById('fb-sec-col').value;
+        const secBeam  = document.getElementById('fb-sec-beam').value;
+
+        document.getElementById('modal-frame-builder').classList.add('hidden');
+        this.log(`Building portal frame: ${span}m × ${height}m, load=${loadVal} ${loadUnit}…`);
+
+        try {
+            const res  = await fetch(`${API}/build-frame`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    span_m: span, height_m: height,
+                    load_value: loadVal, load_unit: loadUnit,
+                    left_support: leftSup, right_support: rightSup,
+                    section_col: secCol, section_beam: secBeam
+                })
+            });
+            const data = await res.json();
+            if (!data.success) { this.logError('Frame builder: ' + data.error); return; }
+
+            this._loadCanvasModel(data.canvas_model);
+            this.log(`Frame built: 4 nodes, 3 elements — solving…`);
+            await this.solve();
+        } catch (e) {
+            this.logError('Frame builder failed: ' + e.message);
+        }
+    }
+
     async runAIExtract() {
         const file = document.getElementById('extract-file-input').files[0];
         if (!file) { this.logError('Select an image file first'); return; }
@@ -487,12 +533,21 @@ class BeamSolverApp {
             // Guard: nothing extracted — show helpful message, don't solve
             if (!cm.nodes || cm.nodes.length === 0) {
                 status.textContent = '';
-                this.logError(
-                    'AI could not read the structure from this image. ' +
-                    'Make sure the image shows a clear beam diagram with visible ' +
-                    'supports, spans/dimensions, and loads. ' +
-                    'Text-only pages (instructions, notes) cannot be extracted.'
-                );
+                // Detect if it's a frame problem and suggest Frame Builder
+                const rawText = JSON.stringify(data).toLowerCase();
+                const isFrame = rawText.includes('frame') || rawText.includes('portal') || rawText.includes('column');
+                if (isFrame) {
+                    this.logError(
+                        'This looks like a FRAME problem. AI cannot read hand-drawn dimensions. ' +
+                        'Use the "Frame Builder" button instead — enter the span, height, and load values manually.'
+                    );
+                } else {
+                    this.logError(
+                        'AI could not read the structure. Upload a clear beam diagram image with ' +
+                        'visible supports, spans, and loads. For hand-drawn frames use "Frame Builder".'
+                    );
+                }
+                document.getElementById('modal-ai-extract').classList.add('hidden');
                 return;
             }
 

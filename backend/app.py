@@ -339,6 +339,72 @@ def ai_extract():
                         'traceback': traceback.format_exc()}), 500
 
 
+# ── FRAME BUILDER ─────────────────────────────────────────────────────────────
+
+@app.route('/api/build-frame', methods=['POST'])
+def build_frame():
+    """
+    Build a portal frame canvas model from parameters.
+    Body: { span_m, height_m, load_value, load_unit, left_support, right_support,
+            section_col, section_beam }
+    Returns: { success, canvas_model }
+    """
+    try:
+        d = request.get_json(force=True) or {}
+        span   = float(d.get('span_m',   12.0))
+        height = float(d.get('height_m',  4.0))
+        load   = float(d.get('load_value', 0.0))
+        unit   = d.get('load_unit', 'kN/m').lower()
+        lsup   = d.get('left_support',  'fixed')
+        rsup   = d.get('right_support', 'pin')
+        sec_col  = d.get('section_col',  'IPE-200')
+        sec_beam = d.get('section_beam', 'IPE-300')
+
+        # Convert units to kN/m or kN
+        if unit in ('ton/m', 'tonne/m', 't/m'):
+            load_kn = round(load * 9.81, 4)   # metric ton/m → kN/m
+        elif unit in ('kip/ft', 'k/ft'):
+            load_kn = round(load * 14.5939, 4)
+        else:
+            load_kn = load  # already kN or kN/m
+
+        # Canvas coordinates: 1m = 100 canvas units (CANVAS_SCALE=10mm, 1m=1000mm)
+        M = 100
+        # A=bottom-left, B=bottom-right, C=top-left, D=top-right
+        # Canvas Y-axis: negative = up (structural Y-up flipped by backend)
+        canvas_model = {
+            'nodes': [
+                {'id': 1, 'x': 0,          'y': 0},
+                {'id': 2, 'x': span * M,   'y': 0},
+                {'id': 3, 'x': 0,          'y': -height * M},
+                {'id': 4, 'x': span * M,   'y': -height * M},
+            ],
+            'elements': [
+                {'id': 1, 'node_i': 1, 'node_j': 3, 'section': sec_col,  'material': 'steel'},  # left col
+                {'id': 2, 'node_i': 3, 'node_j': 4, 'section': sec_beam, 'material': 'steel'},  # beam
+                {'id': 3, 'node_i': 4, 'node_j': 2, 'section': sec_col,  'material': 'steel'},  # right col
+            ],
+            'supports': [
+                {'id': 1, 'node_id': 1, 'type': lsup},
+                {'id': 2, 'node_id': 2, 'type': rsup},
+            ],
+            'loads': [],
+        }
+
+        if load_kn > 0:
+            canvas_model['loads'].append({
+                'id': 1, 'type': 'distributed',
+                'element_id': 2,   # beam element
+                'value': load_kn
+            })
+
+        return jsonify({'success': True, 'canvas_model': canvas_model})
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e),
+                        'traceback': traceback.format_exc()}), 500
+
+
 # ── EXPORT ────────────────────────────────────────────────────────────────────
 
 @app.route('/api/export/pdf', methods=['POST'])
