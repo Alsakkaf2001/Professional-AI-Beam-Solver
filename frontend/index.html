@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Professional AI Beam Solver</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/plotly.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- TOP BAR -->
+        <div class="top-bar">
+            <div class="logo">
+                <span class="logo-icon">⚙️</span>
+                <span class="logo-text">Professional AI Beam Solver</span>
+            </div>
+            <div class="top-actions">
+                <button id="btn-new" class="btn btn-primary" title="New Project">
+                    <span>📄 New</span>
+                </button>
+                <button id="btn-load" class="btn btn-secondary" title="Load Project">
+                    <span>📂 Load</span>
+                </button>
+                <button id="btn-save" class="btn btn-secondary" title="Save Project">
+                    <span>💾 Save</span>
+                </button>
+                <div class="spacer"></div>
+                <div class="project-name" id="project-name">Untitled Project</div>
+            </div>
+        </div>
+
+        <!-- MAIN LAYOUT -->
+        <div class="main-layout">
+            <!-- LEFT TOOLBAR -->
+            <div class="left-toolbar">
+                <div class="toolbar-section">
+                    <h3>Tools</h3>
+                    <button id="tool-select" class="tool-btn active" data-tool="select" title="Select (S)">
+                        <span class="tool-icon">⬅️</span>
+                        <span>Select</span>
+                    </button>
+                    <button id="tool-node" class="tool-btn" data-tool="node" title="Add Node (N)">
+                        <span class="tool-icon">●</span>
+                        <span>Node</span>
+                    </button>
+                    <button id="tool-beam" class="tool-btn" data-tool="beam" title="Add Beam (B)">
+                        <span class="tool-icon">━━</span>
+                        <span>Beam</span>
+                    </button>
+                    <button id="tool-support" class="tool-btn" data-tool="support" title="Add Support (P)">
+                        <span class="tool-icon">⌂</span>
+                        <span>Support</span>
+                    </button>
+                    <button id="tool-point-load" class="tool-btn" data-tool="point-load" title="Point Load (L)">
+                        <span class="tool-icon">⬇️</span>
+                        <span>Point Load</span>
+                    </button>
+                    <button id="tool-udl" class="tool-btn" data-tool="udl" title="Distributed Load (U)">
+                        <span class="tool-icon">󠇛󠇛󠇛</span>
+                        <span>UDL</span>
+                    </button>
+                </div>
+
+                <div class="toolbar-section">
+                    <h3>Actions</h3>
+                    <button id="btn-validate" class="tool-btn" title="Validate Structure">
+                        <span class="tool-icon">✓</span>
+                        <span>Validate</span>
+                    </button>
+                    <button id="btn-solve" class="tool-btn solve-btn" title="Solve (ENTER)">
+                        <span class="tool-icon">▶️</span>
+                        <span>Solve</span>
+                    </button>
+                </div>
+
+                <div class="toolbar-section">
+                    <h3>AI Tools</h3>
+                    <button id="btn-extract-image" class="tool-btn" title="Extract from Image">
+                        <span class="tool-icon">🖼️</span>
+                        <span>AI Extract</span>
+                    </button>
+                </div>
+
+                <div class="toolbar-section">
+                    <h3>Export</h3>
+                    <button id="btn-export-pdf" class="tool-btn" title="Export PDF">
+                        <span class="tool-icon">📊</span>
+                        <span>PDF Report</span>
+                    </button>
+                    <button id="btn-export-dxf" class="tool-btn" title="Export DXF">
+                        <span class="tool-icon">📐</span>
+                        <span>DXF</span>
+                    </button>
+                </div>
+
+                <div class="toolbar-section">
+                    <h3>View</h3>
+                    <button id="btn-fit-view" class="tool-btn" title="Fit to View">
+                        <span class="tool-icon">⊡</span>
+                        <span>Fit View</span>
+                    </button>
+                    <button id="btn-zoom-in" class="tool-btn" title="Zoom In (+)">
+                        <span class="tool-icon">🔍+</span>
+                    </button>
+                    <button id="btn-zoom-out" class="tool-btn" title="Zoom Out (-)">
+                        <span class="tool-icon">🔍−</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- CENTER CANVAS -->
+            <div class="center-area">
+                <canvas id="canvas" class="drawing-canvas"></canvas>
+                <div class="canvas-stats">
+                    <span id="stat-zoom">100%</span> •
+                    <span id="stat-pos">X:0 Y:0</span> •
+                    <span id="stat-mode">Select</span>
+                </div>
+            </div>
+
+            <!-- RIGHT PANEL -->
+            <div class="right-panel">
+                <div class="panel-tab-headers">
+                    <button class="panel-tab-btn active" data-tab="properties">Properties</button>
+                    <button class="panel-tab-btn" data-tab="results">Results</button>
+                    <button class="panel-tab-btn" data-tab="console">Console</button>
+                </div>
+
+                <!-- PROPERTIES TAB -->
+                <div class="panel-tab-content active" id="tab-properties">
+                    <div class="property-section">
+                        <h4>Selected Element</h4>
+                        <div id="properties-content" class="properties-empty">
+                            <p>Nothing selected</p>
+                        </div>
+                    </div>
+
+                    <div class="property-section">
+                        <h4>Materials</h4>
+                        <select id="material-select">
+                            <option value="steel">Steel (E=200 GPa)</option>
+                            <option value="aluminum">Aluminum (E=70 GPa)</option>
+                            <option value="concrete">Concrete (E=30 GPa)</option>
+                        </select>
+                    </div>
+
+                    <div class="property-section">
+                        <h4>Sections</h4>
+                        <select id="section-select">
+                            <option value="IPE-100">IPE-100</option>
+                            <option value="IPE-200">IPE-200</option>
+                            <option value="IPE-300">IPE-300</option>
+                            <option value="HEB-100">HEB-100</option>
+                            <option value="HEB-200">HEB-200</option>
+                        </select>
+                    </div>
+
+                    <div class="property-section">
+                        <h4>Support Type</h4>
+                        <select id="support-type-select">
+                            <option value="pin">Pin</option>
+                            <option value="fixed">Fixed</option>
+                            <option value="roller_x">Roller-X</option>
+                            <option value="roller_y">Roller-Y</option>
+                        </select>
+                    </div>
+
+                    <div class="property-section">
+                        <h4>Load Value</h4>
+                        <input type="number" id="load-value" placeholder="Load (kN)" value="10">
+                    </div>
+                </div>
+
+                <!-- RESULTS TAB -->
+                <div class="panel-tab-content" id="tab-results">
+                    <div class="results-section">
+                        <h4>Displacements</h4>
+                        <div id="results-displacements" class="results-empty">
+                            <p>No results yet. Solve the structure first.</p>
+                        </div>
+                    </div>
+
+                    <div class="results-section">
+                        <h4>Reactions</h4>
+                        <div id="results-reactions" class="results-empty">
+                            <p>No results yet.</p>
+                        </div>
+                    </div>
+
+                    <div class="diagram-container">
+                        <h4>Diagrams</h4>
+                        <div class="diagram-options">
+                            <button id="btn-show-sfd" class="diagram-btn active">SFD</button>
+                            <button id="btn-show-bmd" class="diagram-btn active">BMD</button>
+                            <button id="btn-show-deformation" class="diagram-btn">Deformation</button>
+                        </div>
+                        <canvas id="diagram-canvas" class="diagram-canvas"></canvas>
+                    </div>
+                </div>
+
+                <!-- CONSOLE TAB -->
+                <div class="panel-tab-content" id="tab-console">
+                    <div class="console-output" id="console-output">
+                        <p class="console-info">> Professional AI Beam Solver v1.0</p>
+                        <p class="console-info">> Ready for input</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- BOTTOM STATUS BAR -->
+        <div class="bottom-bar">
+            <div class="status-info">
+                <span id="status-text">Ready</span>
+                <span class="status-separator">|</span>
+                <span id="status-model">Nodes: 0 | Elements: 0 | Supports: 0 | Loads: 0</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- MODALS -->
+    <div id="modal-support-type" class="modal hidden">
+        <div class="modal-content">
+            <h3>Select Support Type</h3>
+            <div class="modal-buttons">
+                <button class="btn btn-primary" data-support="pin">Pin</button>
+                <button class="btn btn-primary" data-support="fixed">Fixed</button>
+                <button class="btn btn-primary" data-support="roller_x">Roller-X</button>
+                <button class="btn btn-primary" data-support="roller_y">Roller-Y</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="modal-load-value" class="modal hidden">
+        <div class="modal-content">
+            <h3>Enter Load Value</h3>
+            <input type="number" id="modal-load-input" placeholder="Load (kN)" value="10">
+            <div class="modal-buttons">
+                <button class="btn btn-primary" id="modal-load-ok">OK</button>
+                <button class="btn btn-secondary" id="modal-load-cancel">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="modal-ai-extract" class="modal hidden">
+        <div class="modal-content">
+            <h3>Extract Structure from Image</h3>
+            <input type="file" id="extract-file-input" accept="image/*">
+            <div id="extract-preview" class="extract-preview"></div>
+            <div id="extract-status" class="extract-status"></div>
+            <div class="modal-buttons">
+                <button class="btn btn-primary" id="modal-extract-ok">Extract</button>
+                <button class="btn btn-secondary" id="modal-extract-cancel">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="canvas.js"></script>
+    <script src="diagrams.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
