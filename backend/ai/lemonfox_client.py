@@ -1,171 +1,301 @@
-"""LemonFox AI client (OpenAI-compatible API) with OCR image analysis."""
+"""LemonFox AI client — OpenAI-compatible API + computer-vision image analysis."""
 import json
 import os
 import re
 import base64
 from typing import Optional
+import numpy as np
+from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 from openai import OpenAI
-from PIL import Image, ImageFilter, ImageOps
 
+
+# ── Extraction prompt ─────────────────────────────────────────────────────────
 
 EXTRACTION_PROMPT = """You are a structural engineering AI assistant.
 
-Based on the structural drawing information provided, extract the FEM model.
+Based on the structural analysis provided below, return a complete FEM model as STRICT JSON.
 
-Return STRICT JSON only. No markdown. No explanation. No comments.
-
-Use this exact schema:
+Schema:
 {
-  "nodes": [{"id": 1, "x": 0.0, "y": 0.0}],
-  "elements": [{"id": 1, "node_i": 1, "node_j": 2}],
-  "supports": [{"node_id": 1, "type": "pin"}],
-  "loads": [
-    {"type": "point",       "node_id": 2,    "magnitude_kN": 10.0, "direction": "down"},
-    {"type": "distributed", "element_id": 1, "magnitude_kN": 5.0}
+  "nodes":    [{"id":1,"x":0.0,"y":0.0}],
+  "elements": [{"id":1,"node_i":1,"node_j":2,"section":"IPE-200","material":"steel"}],
+  "supports": [{"node_id":1,"type":"pin"}],
+  "loads":    [
+    {"type":"point",       "node_id":2,    "magnitude_kN":10.0,"direction":"down"},
+    {"type":"distributed", "element_id":1, "magnitude_kN":5.0}
   ]
 }
 
 Rules:
-- x increases left to right in METRES (convert ft->m: multiply by 0.3048)
-- y = 0 for all nodes on a horizontal beam
-- Convert k/ft -> kN/m by multiplying by 14.5939
-- Convert kips (k) -> kN by multiplying by 4.4482
-- Distributed loads apply to each element separately (one entry per element)
-- Support types: "pin", "fixed", "roller_x", "roller_y"
-- Load directions: "down", "up", "left", "right"
+- x,y in METRES. x increases left-to-right. y increases upward (0 = ground level).
+- Convert: ft×0.3048=m | k/ft×14.5939=kN/m | ton/m×9.81=kN/m | kip×4.4482=kN
+- For FRAMES: columns are vertical (x constant, y varies). Beam is horizontal (y constant).
+- Distributed loads: one entry per element.
+- Support types: "pin"(ux=uy=0) | "fixed"(ux=uy=rz=0) | "roller_y"(uy=0) | "roller_x"(ux=0)
+- For portal frames: left base = fixed, right base = pin (unless stated otherwise)
+- Load direction: "down","up","left","right"
 
-Only return valid JSON — nothing else."""
+Return ONLY valid JSON — no markdown, no explanation."""
 
 
-def _ocr_image(image_path: str) -> str:
-    """Extract text from image using pytesseract if available."""
+# ── Computer vision helpers ───────────────────────────────────────────────────
+
+def _ocr_region(img_gray: Image.Image, psm: int = 11) -> str:
+    """OCR a PIL grayscale image with enhanced preprocessing."""
     try:
         import pytesseract
-        # Common Windows install path
-        tess_paths = [
-            r'C:\Program Files\Tesseract-OCR\tesseract.exe',
-            r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
-        ]
-        for p in tess_paths:
+        for p in [r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+                  r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe']:
             if os.path.exists(p):
                 pytesseract.pytesseract.tesseract_cmd = p
                 break
 
-        img = Image.open(image_path).convert('L')
-        # Enhance contrast for better OCR
-        img = ImageOps.autocontrast(img)
-        text = pytesseract.image_to_string(img, config='--psm 6')
-        return text.strip()
+        w, h = img_gray.size
+        scale = max(1, 2400 // max(w, h, 1))
+        big   = img_gray.resize((w * scale, h * scale), Image.LANCZOS)
+        enh   = ImageEnhance.Contrast(big).enhance(4.0)
+        binary = enh.point(lambda x: 0 if x < 140 else 255)
+        return pytesseract.image_to_string(binary, config=f'--psm {psm} --oem 1').strip()
     except Exception:
         return ''
 
 
-def _build_text_description(image_path: str) -> str:
-    """Build a text description of the structural image using PIL + OCR."""
-    img   = Image.open(image_path)
-    w, h  = img.size
-    ratio = round(w / h, 2)
+def _multi_ocr(image_path: str) -> dict:
+    """
+    Run OCR on multiple image regions + the full image.
+    Returns { 'full', 'top', 'bottom', 'left', 'right', 'center', 'all' }
+    """
+    img  = Image.open(image_path)
+    w, h = img.size
+    gray = img.convert('L')
 
-    raw_ocr = _ocr_image(image_path)
+    regions = {
+        'full':   gray,
+        'top':    gray.crop((0,      0,      w,     h//3)),
+        'bottom': gray.crop((0,      2*h//3, w,     h)),
+        'left':   gray.crop((0,      0,      w//3,  h)),
+        'right':  gray.crop((2*w//3, 0,      w,     h)),
+        'center': gray.crop((w//5,   h//5,   4*w//5, 4*h//5)),
+    }
 
-    # ── normalise common OCR mistakes ─────────────────────────────────────
-    ocr = raw_ocr
-    # "18 t" / "18 f" / "18ft" -> "18 ft"
-    ocr = re.sub(r'(\d+)\s+[tf]\b', lambda m: m.group(1) + ' ft', ocr)
-    ocr = re.sub(r'(\d+)ft\b', r'\1 ft', ocr)
-    # "2k" / "2 k" before /ft context -> "2 k/ft"
-    ocr = re.sub(r'(\d+(?:\.\d+)?)\s*k\b(?!/)', r'\1 k/ft', ocr)
+    results = {}
+    for name, region in regions.items():
+        texts = set()
+        for psm in [6, 11, 12]:
+            t = _ocr_region(region, psm)
+            if t:
+                texts.add(t)
+        results[name] = ' | '.join(texts)
 
-    # ── extract structured info ───────────────────────────────────────────
-    spans = re.findall(r'(\d+(?:\.\d+)?)\s*(ft|m|mm)\b', ocr, re.IGNORECASE)
+    results['all'] = ' '.join(results.values())
+    return results
 
-    loads_found = re.findall(
-        r'(\d+(?:\.\d+)?)\s*(k/ft|kip/ft|kN/m|kN|k|kip|kips)\b',
-        ocr, re.IGNORECASE
-    )
 
-    labels = re.findall(r'\b([A-Z])\b', ocr)
+def _detect_lines(image_path: str) -> dict:
+    """
+    Use numpy to find dominant horizontal and vertical lines
+    (structural members) in a greyscale image.
+    Returns { h_lines: [y,...], v_lines: [x,...], is_frame, n_h, n_v }
+    """
+    img = Image.open(image_path).convert('L')
+    arr = np.array(img, dtype=np.float32)
+    w, h = img.size
 
-    # ── infer node count from "intermediate supports" ─────────────────────
-    n_intermediate = 0
-    m = re.search(r'(\d+)\s+intermediate', ocr, re.IGNORECASE)
+    # Adaptive dark threshold (lower 30th percentile of pixel values)
+    threshold = float(np.percentile(arr, 30))
+    dark = arr < threshold                       # True = dark pixel
+
+    # Row density → horizontal lines
+    row_dens = dark.mean(axis=1)
+    h_raw    = [y for y in range(h) if row_dens[y] > 0.12]
+
+    # Column density → vertical lines
+    col_dens = dark.mean(axis=0)
+    v_raw    = [x for x in range(w) if col_dens[x] > 0.07]
+
+    def cluster(indices, gap=20):
+        if not indices:
+            return []
+        groups, cur = [], [indices[0]]
+        for i in indices[1:]:
+            if i - cur[-1] <= gap:
+                cur.append(i)
+            else:
+                groups.append(cur); cur = [i]
+        groups.append(cur)
+        return [int(np.median(g)) for g in groups]
+
+    h_lines = cluster(h_raw)
+    v_lines = cluster(v_raw)
+
+    # A portal frame has ≥2 vertical members and ≥1 horizontal member
+    is_frame = len(v_lines) >= 2 and len(h_lines) >= 1
+
+    return {
+        'h_lines': h_lines,  'n_h': len(h_lines),
+        'v_lines': v_lines,  'n_v': len(v_lines),
+        'is_frame': is_frame,
+        'image_wh': (w, h),
+    }
+
+
+def _parse_values(text: str) -> dict:
+    """
+    Extract structural parameters from any OCR text.
+    Handles partial OCR (e.g. '18 t' → '18 ft') and various unit formats.
+    """
+    t = text
+    # Fix OCR artefacts
+    t = re.sub(r'(\d)\s+[tf]\b',  lambda m: m.group(1) + ' ft', t)
+    t = re.sub(r'(\d)ft\b',       r'\1 ft', t)
+    t = re.sub(r'(\d)\s*ton/m',   r'\1 ton/m', t, flags=re.I)
+    t = re.sub(r'(\d)\s*k/ft\b',  r'\1 k/ft', t, flags=re.I)
+    t = re.sub(r'(\d)\s*kn/m\b',  r'\1 kN/m', t, flags=re.I)
+    t = re.sub(r'(\d)\s*k\b(?!/)',r'\1 k/ft', t)   # bare 'k' near number
+
+    dims  = re.findall(r'(\d+(?:\.\d+)?)\s*(m|ft|mm)\b', t, re.I)
+    loads = re.findall(r'(\d+(?:\.\d+)?)\s*(ton/m|t/m|kN/m|k/ft|kip/ft|kN|k|kip|ton)\b', t, re.I)
+    labels= re.findall(r'\b([A-Z])\b', t)
+    muls  = re.findall(r'(\d+)\s*[Ii]\b', t)   # "3I", "2I"
+
+    # Detect distributed loads
+    is_udl = bool(re.search(r'(\d)\s*(ton/m|kn/m|k/ft|kip/ft|/m|/ft)', t, re.I))
+    is_frame   = bool(re.search(r'frame|portal|column', t, re.I))
+    is_continuous = bool(re.search(r'continuous', t, re.I))
+
+    # Intermediate supports
+    n_int = 0
+    m = re.search(r'(\d+)\s+intermediate', t, re.I)
     if m:
-        n_intermediate = int(m.group(1))
+        n_int = int(m.group(1))
 
-    is_continuous = bool(re.search(r'continuous', ocr, re.IGNORECASE))
-    is_distributed = any(u.lower() in ('k/ft', 'kip/ft', 'kn/m') for _, u in loads_found)
+    return {
+        'dims': dims, 'loads': loads, 'labels': labels,
+        'muls': muls, 'is_udl': is_udl, 'is_frame': is_frame,
+        'is_continuous': is_continuous, 'n_intermediate': n_int,
+        'normalised_text': t,
+    }
 
-    desc  = f"Image: {w}x{h}px, aspect {ratio}.\n\n"
-    desc += f"Raw OCR text:\n{raw_ocr}\n\n"
-    desc += f"Normalised OCR:\n{ocr}\n\n"
 
-    if is_continuous:
-        n_nodes = 2 + n_intermediate  # endpoints + intermediate supports
-        n_spans = 1 + n_intermediate
+def _to_metres(val: float, unit: str) -> float:
+    unit = unit.lower()
+    if unit == 'ft':   return round(val * 0.3048, 4)
+    if unit == 'mm':   return round(val / 1000,   4)
+    if unit == 'cm':   return round(val / 100,    4)
+    return round(val, 4)
+
+
+def _to_kn_per_m(val: float, unit: str) -> float:
+    unit = unit.lower()
+    if unit in ('ton/m', 't/m'):  return round(val * 9.81,    4)
+    if unit in ('k/ft', 'kip/ft'):return round(val * 14.5939, 4)
+    return round(val, 4)   # already kN/m
+
+
+def _build_description(image_path: str) -> str:
+    """
+    Full description: computer-vision lines + multi-region OCR + parsed values.
+    """
+    ocr     = _multi_ocr(image_path)
+    lines   = _detect_lines(image_path)
+    parsed  = _parse_values(ocr['all'])
+    w, h    = lines['image_wh']
+
+    desc  = f"=== IMAGE ANALYSIS: {w}x{h}px ===\n\n"
+
+    # ── Structure type ────────────────────────────────────────────────────
+    if lines['is_frame'] or parsed['is_frame']:
+        n_v = lines['n_v']
+        n_h = lines['n_h']
         desc += (
-            f"STRUCTURAL INTERPRETATION:\n"
-            f"  - Continuous horizontal beam\n"
-            f"  - {n_intermediate} intermediate supports -> {n_nodes} nodes, {n_spans} spans, {n_spans} elements\n"
+            f"STRUCTURE TYPE: Portal frame detected\n"
+            f"  Vertical members (columns): {n_v}\n"
+            f"  Horizontal members (beams): {n_h}\n"
+            f"  Typical portal frame layout: left column + horizontal beam + right column\n"
+            f"  Node layout: A(0,0)=bottom-left  B(span,0)=bottom-right  "
+            f"C(0,height)=top-left  D(span,height)=top-right\n"
+            f"  Elements: col-left(A->C), beam(C->D), col-right(D->B)\n\n"
         )
+    elif parsed['is_continuous']:
+        desc += f"STRUCTURE TYPE: Continuous beam, {parsed['n_intermediate']+1} spans\n\n"
+    else:
+        desc += "STRUCTURE TYPE: Simple beam (assumed if unclear)\n\n"
 
-    if spans:
-        span_metres = []
-        for val, unit in spans:
+    # ── Dimensions ────────────────────────────────────────────────────────
+    all_dims = parsed['dims']
+    if all_dims:
+        # Sort by value: smaller → height, larger → span (heuristic for frames)
+        metres = [(_to_metres(float(v), u), v, u) for v, u in all_dims]
+        metres.sort(key=lambda x: x[0])
+        if lines['is_frame'] or parsed['is_frame']:
+            if len(metres) >= 2:
+                height_m = metres[0][0]
+                span_m   = metres[-1][0]
+                desc += f"DIMENSIONS (from OCR):\n"
+                desc += f"  Span  (x-direction): {span_m} m  [{metres[-1][1]} {metres[-1][2]}]\n"
+                desc += f"  Height(y-direction): {height_m} m  [{metres[0][1]} {metres[0][2]}]\n"
+                desc += (
+                    f"  Node coordinates:\n"
+                    f"    A=(0, 0)  B=({span_m}, 0)  C=(0, {height_m})  D=({span_m}, {height_m})\n\n"
+                )
+            elif len(metres) == 1:
+                desc += f"  One dimension found: {metres[0][0]} m — assumed span\n\n"
+        else:
+            # Beam: accumulate spans
+            span_ms = [m[0] for m in metres]
+            x_coords = [round(sum(span_ms[:i]), 4) for i in range(len(span_ms)+1)]
+            desc += f"SPAN DIMENSIONS: {span_ms} m\nNode x-coords: {x_coords}\n\n"
+    else:
+        desc += "DIMENSIONS: None detected by OCR\n\n"
+
+    # ── Loads ─────────────────────────────────────────────────────────────
+    if parsed['loads']:
+        desc += "LOADS:\n"
+        for val, unit in parsed['loads']:
             v = float(val)
-            v_m = round(v * 0.3048, 4) if unit.lower() == 'ft' else v
-            span_metres.append(v_m)
+            if '/' in unit.lower() or unit.lower() in ('ton/m', 't/m'):
+                kn = _to_kn_per_m(v, unit)
+                desc += f"  Distributed load: {val} {unit} = {kn} kN/m\n"
+                desc += f"  Apply to: horizontal beam element(s)\n"
+            else:
+                kn = v * 4.4482 if unit.lower() in ('k', 'kip') else v
+                desc += f"  Point load: {val} {unit} = {kn:.2f} kN\n"
+        desc += "\n"
+    else:
+        desc += "LOADS: None detected\n\n"
 
-        # OCR often drops a leading digit (e.g. "15 ft" -> "5 ft").
-        # Heuristic: any span < 40% of average is likely truncated — prepend "1".
-        if len(span_metres) > 1:
-            avg = sum(span_metres) / len(span_metres)
-            corrected = []
-            for i, (s_m, (val, unit)) in enumerate(zip(span_metres, spans)):
-                if s_m < 0.4 * avg:
-                    new_val = float('1' + val)
-                    s_m = round(new_val * 0.3048, 4) if unit.lower() == 'ft' else new_val
-                corrected.append(s_m)
-            span_metres = corrected
+    # ── OCR raw (by region) ───────────────────────────────────────────────
+    desc += "OCR TEXT BY REGION:\n"
+    for region in ('top', 'right', 'bottom', 'left'):
+        if ocr.get(region, '').strip():
+            desc += f"  {region.upper()}: {ocr[region][:200]}\n"
 
-        x_coords = [round(sum(span_metres[:i]), 4) for i in range(len(span_metres) + 1)]
-        desc += f"  - Span lengths (m): {span_metres}\n"
-        desc += f"  - REQUIRED node x-coordinates: {x_coords}\n"
-        desc += f"  - You MUST use these exact x values for nodes.\n"
+    # ── Section multipliers ───────────────────────────────────────────────
+    if parsed['muls']:
+        desc += f"\nSECTION MULTIPLIERS FOUND: {parsed['muls']}I\n"
+        desc += "  (Use IPE-300 for higher-I beam, IPE-200 for columns)\n"
 
-    if is_distributed:
-        load_kn = 0.0
-        for val, unit in loads_found:
-            v = float(val)
-            if unit.lower() in ('k/ft', 'kip/ft'):
-                load_kn = round(v * 14.5939, 4)
-            elif unit.lower() == 'kn/m':
-                load_kn = v
-        desc += f"  - DISTRIBUTED load = {load_kn} kN/m, applied to EVERY element\n"
-    elif loads_found:
-        for val, unit in loads_found:
-            desc += f"  - Load: {val} {unit}\n"
-
-    if labels:
-        desc += f"  - Node labels: {labels}\n"
-
-    desc += "\nIMPORTANT: intermediate supports on a horizontal beam use type='roller_y'.\n"
+    desc += "\nIMPORTANT INSTRUCTIONS:\n"
+    if lines['is_frame'] or parsed['is_frame']:
+        desc += (
+            "  - This is a PORTAL FRAME. You MUST generate 4 nodes and 3 elements.\n"
+            "  - Left base support (A) = 'fixed', right base (B) = 'pin'\n"
+            "  - Distributed load goes on the BEAM element only (element C->D)\n"
+            "  - Column elements have NO loads\n"
+            "  - Columns are VERTICAL: x is constant, y varies\n"
+        )
     return desc
 
 
-class LemonFoxClient:
-    """LemonFox AI client using the OpenAI-compatible API."""
+# ── LemonFox client ───────────────────────────────────────────────────────────
 
+class LemonFoxClient:
     def __init__(self, api_key: Optional[str] = None):
         key = api_key or os.getenv('LEMONFOX_API_KEY')
         if not key:
-            raise ValueError(
-                "LemonFox API key not found. "
-                "Set the LEMONFOX_API_KEY environment variable."
-            )
+            raise ValueError("LemonFox API key not found. Set LEMONFOX_API_KEY.")
         self.client = OpenAI(api_key=key, base_url="https://api.lemonfox.ai/v1")
         self.model  = 'llama-70b-chat'
-
-    # ── helpers ───────────────────────────────────────────────────────────────
 
     def _extract_json(self, text: str) -> str:
         text = text.strip()
@@ -173,189 +303,142 @@ class LemonFoxClient:
         if fence:
             text = fence.group(1).strip()
         try:
-            json.loads(text)
-            return text
+            json.loads(text); return text
         except json.JSONDecodeError:
             pass
-        for open_c, close_c in [('{', '}'), ('[', ']')]:
-            start = text.find(open_c)
-            if start == -1:
-                continue
-            depth  = 0
-            in_str = False
-            esc    = False
-            for i, ch in enumerate(text[start:], start):
-                if esc:                  esc = False;  continue
+        for oc, cc in [('{', '}'), ('[', ']')]:
+            s = text.find(oc)
+            if s == -1: continue
+            depth = 0; in_str = False; esc = False
+            for i, ch in enumerate(text[s:], s):
+                if esc:                   esc = False; continue
                 if ch == '\\' and in_str: esc = True;  continue
-                if ch == '"':            in_str = not in_str; continue
-                if in_str:               continue
-                if ch == open_c:         depth += 1
-                elif ch == close_c:
+                if ch == '"':             in_str = not in_str; continue
+                if in_str:                continue
+                if ch == oc:              depth += 1
+                elif ch == cc:
                     depth -= 1
                     if depth == 0:
-                        return text[start:i + 1]
-        raise ValueError(f"No JSON found in response.\nRaw (first 400):\n{text[:400]}")
+                        return text[s:i+1]
+        raise ValueError(f"No JSON in response.\nRaw (400 chars):\n{text[:400]}")
 
     def _parse_json(self, text: str) -> dict:
         return json.loads(self._extract_json(text))
 
     def _image_to_base64(self, image_path: str):
         ext  = image_path.rsplit('.', 1)[-1].lower()
-        mime = {'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
-                'png': 'image/png',  'gif':  'image/gif',
-                'webp': 'image/webp'}.get(ext, 'image/jpeg')
+        mime = {'jpg':'image/jpeg','jpeg':'image/jpeg','png':'image/png',
+                'gif':'image/gif','webp':'image/webp'}.get(ext,'image/jpeg')
         with open(image_path, 'rb') as f:
-            return base64.b64encode(f.read()).decode('utf-8'), mime
+            return base64.b64encode(f.read()).decode(), mime
 
-    # ── public API ────────────────────────────────────────────────────────────
-
-    def analyze_image(self, image_path: str, prompt: str) -> str:
-        """Try vision API first; fall back to OCR + text analysis."""
-        b64, mime = self._image_to_base64(image_path)
-
-        # 1. Attempt vision (base64 image_url)
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url",
-                         "image_url": {"url": f"data:{mime};base64,{b64}"}},
-                        {"type": "text", "text": prompt}
-                    ]
-                }]
-            )
-            return response.choices[0].message.content
-        except Exception:
-            pass
-
-        # 2. OCR + PIL description fallback
-        description = _build_text_description(image_path)
-        full_prompt = (
-            f"A structural engineering drawing was uploaded. "
-            f"Here is everything that could be extracted from it:\n\n"
-            f"{description}\n\n"
-            f"Using this information, build the complete FEM structural model.\n\n"
-            f"{prompt}"
-        )
+    def _call_llm(self, prompt: str) -> str:
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system",
                  "content": "You are a structural engineering assistant. Return only valid JSON."},
-                {"role": "user", "content": full_prompt}
+                {"role": "user", "content": prompt}
             ]
         )
         return response.choices[0].message.content
 
-    def _extract_geometry_from_ocr(self, image_path: str):
-        """
-        Use OCR to compute definitive node coordinates.
-        Returns (x_coords, n_nodes) or (None, None) if not enough info.
-        """
-        raw_ocr = _ocr_image(image_path)
-        if not raw_ocr:
-            return None, None
+    # ── Public API ────────────────────────────────────────────────────────
 
-        ocr = raw_ocr
-        ocr = re.sub(r'(\d+)\s+[tf]\b', lambda m: m.group(1) + ' ft', ocr)
-        ocr = re.sub(r'(\d+)ft\b', r'\1 ft', ocr)
-        ocr = re.sub(r'(\d+(?:\.\d+)?)\s*k\b(?!/)', r'\1 k/ft', ocr)
+    def analyze_image(self, image_path: str, prompt: str) -> str:
+        """Vision attempt first, then CV+OCR fallback."""
+        b64, mime = self._image_to_base64(image_path)
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                    {"type": "text",      "text": prompt}
+                ]}]
+            )
+            return response.choices[0].message.content
+        except Exception:
+            pass
 
-        spans_raw = re.findall(r'(\d+(?:\.\d+)?)\s*(ft|m|mm)\b', ocr, re.IGNORECASE)
-        if not spans_raw:
-            return None, None
-
-        span_metres = []
-        for val, unit in spans_raw:
-            v = float(val)
-            v_m = round(v * 0.3048, 4) if unit.lower() == 'ft' else v
-            span_metres.append(v_m)
-
-        # Correct OCR-truncated spans (< 40% of average)
-        if len(span_metres) > 1:
-            avg = sum(span_metres) / len(span_metres)
-            corrected = []
-            for s_m, (val, unit) in zip(span_metres, spans_raw):
-                if s_m < 0.4 * avg:
-                    new_val = float('1' + val)
-                    s_m = round(new_val * 0.3048, 4) if unit.lower() == 'ft' else new_val
-                corrected.append(s_m)
-            span_metres = corrected
-
-        x_coords = [round(sum(span_metres[:i]), 4) for i in range(len(span_metres) + 1)]
-        return x_coords, len(x_coords)
+        # CV + OCR fallback
+        description = _build_description(image_path)
+        return self._call_llm(
+            f"A structural engineering drawing was analysed with computer vision and OCR.\n"
+            f"Here is everything extracted:\n\n{description}\n\n{prompt}"
+        )
 
     def extract_structure_from_image(self, image_path: str) -> dict:
         raw = self.analyze_image(image_path, EXTRACTION_PROMPT)
         try:
             result = self._parse_json(raw)
         except (json.JSONDecodeError, ValueError) as e:
-            raise ValueError(
-                f"LemonFox returned non-JSON output.\n"
-                f"Parse error: {e}\n"
-                f"Response (first 400): {raw[:400]}"
-            )
+            raise ValueError(f"LemonFox non-JSON output.\nError: {e}\nRaw: {raw[:400]}")
 
-        # If LLM returned empty nodes — retry with an even more explicit prompt
+        # Retry if empty
         if not result.get('nodes'):
-            retry_prompt = (
-                f"The following OCR text was extracted from a structural engineering image.\n"
-                f"Build a complete FEM beam model from it. "
-                f"If you see span lengths, supports labels (A,B,C), and loads — use them.\n"
-                f"If the text is unclear, create a default simply-supported beam 6m long "
-                f"with a 50 kN central point load.\n\n"
-                f"OCR text:\n{_ocr_image(image_path)}\n\n"
-                f"{EXTRACTION_PROMPT}"
+            desc = _build_description(image_path)
+            retry = (
+                f"Computer vision extracted this from the structural image:\n\n{desc}\n\n"
+                f"Generate a complete FEM model. If some dimensions are unclear, make "
+                f"reasonable engineering assumptions.\n\n{EXTRACTION_PROMPT}"
             )
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system",
-                         "content": "You are a structural engineering assistant. Return only valid JSON."},
-                        {"role": "user", "content": retry_prompt}
-                    ]
-                )
-                result = self._parse_json(response.choices[0].message.content)
+                result = self._parse_json(self._call_llm(retry))
             except Exception:
-                pass  # Fall through — frontend will show helpful error
+                pass
 
-        # Override node coordinates with OCR-computed geometry (more reliable)
-        x_coords, n_ocr = self._extract_geometry_from_ocr(image_path)
-        nodes = result.get('nodes', [])
-        if x_coords and len(x_coords) == len(nodes):
-            for node, x in zip(nodes, x_coords):
-                node['x'] = x
-                node['y'] = 0.0
-
+        # Override node coordinates with OCR geometry (more reliable than LLM guesses)
+        self._apply_ocr_geometry(image_path, result)
         return result
 
+    def _apply_ocr_geometry(self, image_path: str, result: dict):
+        """
+        Replace LLM-guessed node coordinates with OCR-computed ones when possible.
+        """
+        ocr    = _multi_ocr(image_path)
+        parsed = _parse_values(ocr['all'])
+        lines  = _detect_lines(image_path)
+        nodes  = result.get('nodes', [])
+
+        if not nodes:
+            return
+
+        is_frame = lines['is_frame'] or parsed['is_frame']
+        dims_m   = [_to_metres(float(v), u) for v, u in parsed['dims']]
+        dims_m.sort()
+
+        if is_frame and len(nodes) == 4 and len(dims_m) >= 2:
+            span_m   = dims_m[-1]
+            height_m = dims_m[0]
+            # Assign canonical portal frame coordinates
+            # A=node1(0,0), B=node2(span,0), C=node3(0,height), D=node4(span,height)
+            coords = [(0, 0), (span_m, 0), (0, height_m), (span_m, height_m)]
+            for node, (x, y) in zip(nodes, coords):
+                node['x'] = x; node['y'] = y
+
+        elif not is_frame and len(dims_m) >= 1:
+            # Beam: correct truncated OCR spans
+            spans = list(dims_m)
+            if len(spans) > 1:
+                avg = sum(spans) / len(spans)
+                spans = [s * 3 if s < 0.4 * avg else s for s in spans]
+            x_coords = [round(sum(spans[:i]), 4) for i in range(len(spans)+1)]
+            if len(x_coords) == len(nodes):
+                for node, x in zip(nodes, x_coords):
+                    node['x'] = x; node['y'] = 0.0
+
     def repair_structural_data(self, structure_data: dict) -> dict:
-        prompt = f"""You are a structural engineer reviewing auto-extracted FEM data.
+        prompt = f"""Structural engineer reviewing FEM data. Check and repair:
+1. All node_i/node_j in elements must reference valid node IDs
+2. Total constrained DOF >= 3
+3. Distributed loads: one entry PER element
 
-Check and repair:
-1. Element references — all node_i / node_j must exist in nodes list
-2. Support coverage — total constrained DOF >= 3 (pin=2, fixed=3, roller=1)
-3. Distributed loads must have one entry PER ELEMENT, not one for the whole beam
-4. Duplicate node IDs — merge if coordinates within 0.1 units
-
-Input data:
+Input:
 {json.dumps(structure_data, indent=2)}
 
-Return STRICT JSON only — same schema plus a "repairs" array.
-No markdown. No explanation."""
+Return STRICT JSON only — same schema plus "repairs" array."""
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system",
-                     "content": "You are a structural engineering assistant. Return only valid JSON."},
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            result = self._parse_json(response.choices[0].message.content)
+            result = self._parse_json(self._call_llm(prompt))
             result.setdefault('repairs', [])
             return result
         except Exception:
