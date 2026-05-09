@@ -34,6 +34,7 @@ body {
     flex-direction: column;
     height: 100vh;
     width: 100vw;
+    padding-bottom: 52px;   /* reserve space for fixed chat bar */
 }
 
 .top-bar {
@@ -136,17 +137,20 @@ body {
     gap: 12px;
 }
 
-/* ── AI Chat Bar (fixed bottom strip, always visible) ── */
+/* ── AI Chat Bar ── */
 .chat-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 8px 14px;
     background: #1e2a3a;
     border-top: 2px solid var(--accent-primary);
-    flex-shrink: 0;
     height: 52px;
-    z-index: 50;
+    z-index: 1000;
 }
 .chat-bar-label {
     font-size: 13px;
