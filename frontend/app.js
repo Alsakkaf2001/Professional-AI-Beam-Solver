@@ -466,7 +466,7 @@ class BeamSolverApp {
         if (!file) { this.logError('Select an image file first'); return; }
 
         const status = document.getElementById('extract-status');
-        status.textContent = 'Analysing image with Gemini AI…';
+        status.textContent = 'Step 1/2 — Analysing image with AI…';
 
         const form = new FormData();
         form.append('image', file);
@@ -481,26 +481,26 @@ class BeamSolverApp {
                 return;
             }
 
-            // Use the ready-to-use canvas_model from backend
             const cm = data.extraction?.canvas_model;
-            if (cm) {
-                this._loadCanvasModel(cm);
-                document.getElementById('modal-ai-extract').classList.add('hidden');
+            if (!cm) { status.textContent = 'No structure data returned'; return; }
 
-                const v = data.extraction?.validation;
-                if (v?.issues?.length) {
-                    this.logError('AI extract warnings: ' + v.issues.join('; '));
-                }
-                if (v?.warnings?.length) {
-                    this.log('Warnings: ' + v.warnings.join('; '));
-                }
-                this.log(`Gemini extracted: ${cm.nodes.length} nodes, `
-                       + `${cm.elements.length} elements, `
-                       + `${cm.supports.length} supports, `
-                       + `${cm.loads.length} loads — review then solve`);
-            } else {
-                status.textContent = 'No structure data returned';
-            }
+            // Load model onto canvas
+            this._loadCanvasModel(cm);
+            document.getElementById('modal-ai-extract').classList.add('hidden');
+
+            const v = data.extraction?.validation;
+            if (v?.issues?.length)   this.logError('AI extract warnings: ' + v.issues.join('; '));
+            if (v?.warnings?.length) this.log('Warnings: ' + v.warnings.join('; '));
+
+            this.log(`AI extracted: ${cm.nodes.length} nodes, `
+                   + `${cm.elements.length} elements, `
+                   + `${cm.supports.length} supports, `
+                   + `${cm.loads.length} loads`);
+
+            // ── Auto-solve immediately ──────────────────────────────────────
+            this.log('Step 2/2 — Solving automatically…');
+            await this.solve();
+
         } catch (e) {
             status.textContent = 'Network error: ' + e.message;
             this.logError('AI extract failed: ' + e.message);
