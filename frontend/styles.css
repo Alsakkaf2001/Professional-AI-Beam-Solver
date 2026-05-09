@@ -135,6 +135,43 @@ body {
     gap: 12px;
 }
 
+/* ── AI Chat Bar ── */
+.chat-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: #1e2a3a;
+    border-top: 2px solid var(--accent-primary);
+}
+.chat-bar-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent-primary);
+    white-space: nowrap;
+}
+.chat-input {
+    flex: 1;
+    padding: 8px 12px;
+    background: #2a3a4a;
+    border: 1px solid var(--accent-primary);
+    border-radius: 20px;
+    color: #fff;
+    font-size: 13px;
+    outline: none;
+}
+.chat-input:focus {
+    border-color: #4aa8ff;
+    background: #2e4058;
+}
+.chat-input::placeholder { color: #6a8aaa; }
+.chat-send {
+    border-radius: 20px;
+    padding: 7px 18px;
+    font-size: 13px;
+    white-space: nowrap;
+}
+
 .right-panel {
     width: 280px;
     background-color: var(--secondary-bg);

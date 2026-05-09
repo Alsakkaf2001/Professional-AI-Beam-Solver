@@ -65,6 +65,12 @@ class BeamSolverApp {
         document.getElementById('btn-extract-image').addEventListener('click', () => this.openAIExtract());
         document.getElementById('btn-frame-builder').addEventListener('click', () => this.openFrameBuilder());
 
+        // Chat bar
+        document.getElementById('chat-send-btn').addEventListener('click', () => this.chatSolve());
+        document.getElementById('chat-input').addEventListener('keydown', e => {
+            if (e.key === 'Enter') this.chatSolve();
+        });
+
         // Frame builder modal
         document.getElementById('fb-cancel-btn').addEventListener('click', () => {
             document.getElementById('modal-frame-builder').classList.add('hidden');
@@ -466,6 +472,48 @@ class BeamSolverApp {
 
     openAIExtract() {
         document.getElementById('modal-ai-extract').classList.remove('hidden');
+    }
+
+    async chatSolve() {
+        const input = document.getElementById('chat-input');
+        const msg   = input.value.trim();
+        if (!msg) return;
+
+        const btn = document.getElementById('chat-send-btn');
+        btn.textContent = '⏳ Thinking…';
+        btn.disabled    = true;
+        this.log(`Chat: "${msg}"`);
+
+        try {
+            const res  = await fetch(`${API}/chat-extract`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ message: msg })
+            });
+            const data = await res.json();
+
+            if (!data.success) {
+                this.logError('Chat error: ' + data.error);
+                return;
+            }
+
+            const cm = data.canvas_model;
+            if (!cm || !cm.nodes || cm.nodes.length === 0) {
+                this.logError('AI could not understand the problem. Try rephrasing — e.g. "simply supported beam 6m span, 50kN mid load"');
+                return;
+            }
+
+            this._loadCanvasModel(cm);
+            input.value = '';
+            this.log(`AI built: ${cm.nodes.length} nodes, ${cm.elements.length} elements — solving…`);
+            await this.solve();
+
+        } catch (e) {
+            this.logError('Chat failed: ' + e.message);
+        } finally {
+            btn.textContent = 'Solve ▶';
+            btn.disabled    = false;
+        }
     }
 
     openFrameBuilder() {

@@ -339,6 +339,80 @@ def ai_extract():
                         'traceback': traceback.format_exc()}), 500
 
 
+# ── CHAT EXTRACTION ───────────────────────────────────────────────────────────
+
+@app.route('/api/chat-extract', methods=['POST'])
+def chat_extract():
+    """
+    Accept a natural-language structural problem description,
+    parse it with LemonFox, return a canvas_model ready to solve.
+    Body: { "message": "simply supported beam 6m span, 50kN mid-span load" }
+    """
+    try:
+        data    = request.get_json(force=True) or {}
+        message = data.get('message', '').strip()
+        if not message:
+            return jsonify({'success': False, 'error': 'No message provided'}), 400
+
+        from ai.lemonfox_client import LemonFoxClient, EXTRACTION_PROMPT
+        api_key = os.getenv('LEMONFOX_API_KEY')
+        client  = LemonFoxClient(api_key)
+
+        prompt = (
+            f"A structural engineer described the following problem:\n\n"
+            f"\"{message}\"\n\n"
+            f"Extract the complete FEM model from this description.\n\n"
+            f"{EXTRACTION_PROMPT}"
+        )
+        raw    = client._call_llm(prompt)
+        result = client._parse_json(raw)
+
+        # Normalise field names
+        result = _normalise_ai_model(result)
+
+        # Convert to canvas model
+        CANVAS_SCALE = 10
+        M_TO_CANVAS  = 1000 / CANVAS_SCALE   # 1 m = 100 canvas units
+
+        canvas_nodes = [{'id': n['id'],
+                         'x': round(n['x'] * M_TO_CANVAS, 1),
+                         'y': round(-n['y'] * M_TO_CANVAS, 1)}
+                        for n in result.get('nodes', [])]
+
+        canvas_elements = [{'id': e['id'], 'node_i': e['node_i'], 'node_j': e['node_j'],
+                             'material': e.get('material', 'steel'),
+                             'section':  e.get('section',  'IPE-200')}
+                           for e in result.get('elements', [])]
+
+        canvas_supports = [{'id': i+1, 'node_id': s['node_id'], 'type': s.get('type','pin')}
+                           for i, s in enumerate(result.get('supports', []))]
+
+        canvas_loads = []
+        for i, ld in enumerate(result.get('loads', [])):
+            mag  = float(ld.get('magnitude_kN', ld.get('value', 10)))
+            ltype= ld.get('type', 'point')
+            entry = {'id': i+1, 'type': ltype, 'value': mag}
+            if ltype == 'point':
+                entry['node_id']    = ld.get('node_id')
+            else:
+                entry['element_id'] = ld.get('element_id')
+            canvas_loads.append(entry)
+
+        return jsonify({
+            'success': True,
+            'canvas_model': {
+                'nodes':    canvas_nodes,
+                'elements': canvas_elements,
+                'supports': canvas_supports,
+                'loads':    canvas_loads,
+            }
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e),
+                        'traceback': traceback.format_exc()}), 500
+
+
 # ── FRAME BUILDER ─────────────────────────────────────────────────────────────
 
 @app.route('/api/build-frame', methods=['POST'])
